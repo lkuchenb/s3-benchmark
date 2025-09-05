@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "s3-presigned-benchmark"
+version = "1.0.0"
+description = "Benchmark S3 object downloads using pre-signed URLs and multi-part downloads"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "S3 Benchmark Author"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache License 2.0",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "boto3>=1.28.0",
+    "httpx>=0.24.0",
+]
+
+[project.license]
+text = "Apache 2.0"
+
+[project.scripts]
+s3-benchmark = "s3_benchmark.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
