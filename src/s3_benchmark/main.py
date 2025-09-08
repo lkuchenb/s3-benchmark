@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-S3 Download Benchmark Tool
+S3 Benchmark Tool
 
-A tool to benchmark S3 object downloads using pre-signed URLs and multi-part downloads
-with asyncio for parallel processing.
+A tool to benchmark S3 operations using pre-signed URLs and multi-part transfers
+with asyncio for parallel processing. Supports both download and upload modes.
 """
 
 import argparse
 import asyncio
 import hashlib
+import random
 import re
 import sys
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import boto3
 from botocore.config import Config
@@ -21,19 +22,50 @@ import httpx
 # Constants
 DEFAULT_PART_SIZE = 5 * 1024 * 1024  # 5 MB
 DEFAULT_PARALLEL_PARTS = 5
+DEFAULT_SEED = 42
+
+# Operation modes
+MODE_DOWNLOAD = "download"
+MODE_UPLOAD = "upload"
 
 
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Benchmark S3 object downloads using pre-signed URLs and multi-part downloads."
+        description="Benchmark S3 operations using pre-signed URLs and multi-part transfers."
     )
     
+    # Mode selection
     parser.add_argument(
-        "s3_uri",
+        "mode",
+        choices=[MODE_DOWNLOAD, MODE_UPLOAD],
+        help="Operation mode: download or upload"
+    )
+    
+    # Download mode arguments
+    download_group = parser.add_argument_group("Download mode arguments")
+    download_group.add_argument(
+        "--s3-uri",
         help="S3 URI of the object to download (s3://bucket-name/object-key)"
     )
     
+    # Upload mode arguments
+    upload_group = parser.add_argument_group("Upload mode arguments")
+    upload_group.add_argument(
+        "--bucket",
+        help="S3 bucket name for upload"
+    )
+    upload_group.add_argument(
+        "--key",
+        help="S3 object key for upload"
+    )
+    upload_group.add_argument(
+        "--file-size",
+        type=str,
+        help="Size of the file to upload (e.g., '100MB'). Accepts suffixes KB, MB, GB."
+    )
+    
+    # Common transfer arguments
     parser.add_argument(
         "--part-size",
         type=str,
@@ -47,7 +79,7 @@ def parse_arguments():
         type=int,
         nargs='+',
         default=[DEFAULT_PARALLEL_PARTS],
-        help=f"Number of parts to download in parallel for benchmarking (e.g., '5 10 20'). Default: {DEFAULT_PARALLEL_PARTS}"
+        help=f"Number of parts to transfer in parallel for benchmarking (e.g., '5 10 20'). Default: {DEFAULT_PARALLEL_PARTS}"
     )
     
     parser.add_argument(
@@ -97,8 +129,18 @@ def parse_arguments():
     
     args = parser.parse_args()
     
+    # Validate mode-specific arguments
+    if args.mode == MODE_DOWNLOAD and not args.s3_uri:
+        parser.error("download mode requires --s3-uri")
+    elif args.mode == MODE_UPLOAD and (not args.bucket or not args.key or not args.file_size):
+        parser.error("upload mode requires --bucket, --key, and --file-size")
+    
     # Convert part sizes to bytes
     args.part_sizes_bytes = [parse_size(size) for size in args.part_size]
+    
+    # Convert file size to bytes for upload mode
+    if args.mode == MODE_UPLOAD and args.file_size:
+        args.file_size_bytes = parse_size(args.file_size)
     
     return args
 
@@ -213,8 +255,42 @@ def calculate_parts(object_size: int, part_size: int) -> List[Tuple[int, int]]:
     return parts
 
 
+class RandomContentGenerator:
+    """Generate deterministic pseudo-random content for uploads."""
+    
+    def __init__(self):
+        """Initialize the random content generator with a fixed seed."""
+        self.seed = DEFAULT_SEED
+        
+    def generate_content(self, start_byte: int, end_byte: int) -> bytes:
+        """
+        Generate deterministic pseudo-random content for a specific byte range.
+        
+        Args:
+            start_byte: Start byte position
+            end_byte: End byte position (inclusive)
+            
+        Returns:
+            Bytes object containing the generated content
+        """
+        # Calculate the size of the content to generate
+        size = end_byte - start_byte + 1
+        
+        # Create a random generator with a seed based on the start position
+        # This ensures deterministic content for each part
+        rng = random.Random(self.seed + start_byte)
+        
+        # Generate the content as bytes
+        # Using a bytearray for efficiency when generating large content
+        content = bytearray(size)
+        for i in range(size):
+            content[i] = rng.randint(0, 255)
+            
+        return bytes(content)
+
+
 class PresignedUrlGenerator:
-    """Generate pre-signed URLs for each part."""
+    """Generate pre-signed URLs for each part (download or upload)."""
     
     def __init__(self, session, hostname=None, protocol="https", region="us-east-1",
                  use_path_style=False, debug=False):
@@ -269,7 +345,7 @@ class PresignedUrlGenerator:
     def generate_urls(self, bucket: str, key: str, parts: List[Tuple[int, int]],
                      expiration: int = 3600) -> List[Tuple[str, str]]:
         """
-        Generate pre-signed URLs for all parts.
+        Generate pre-signed URLs for downloading parts.
         
         Args:
             bucket: S3 bucket name
@@ -303,10 +379,107 @@ class PresignedUrlGenerator:
             result.append((url, range_header))
         
         return result
+    
+    def generate_upload_urls(self, bucket: str, key: str, parts: List[Tuple[int, int]],
+                            expiration: int = 3600) -> Dict:
+        """
+        Generate pre-signed URLs for uploading parts.
+        
+        Args:
+            bucket: S3 bucket name
+            key: S3 object key
+            parts: List of (start_byte, end_byte) tuples
+            expiration: URL expiration time in seconds
+            
+        Returns:
+            Dictionary with upload_id and parts information
+        """
+        # Create a multipart upload
+        response = self.s3_client.create_multipart_upload(
+            Bucket=bucket,
+            Key=key
+        )
+        upload_id = response['UploadId']
+        
+        if self.debug:
+            print(f"Created multipart upload with ID: {upload_id}")
+        
+        result = []
+        for i, (start, end) in enumerate(parts):
+            part_number = i + 1  # S3 part numbers are 1-based
+            
+            # Generate presigned URL for this part
+            params = {
+                'Bucket': bucket,
+                'Key': key,
+                'UploadId': upload_id,
+                'PartNumber': part_number
+            }
+            
+            url = self.s3_client.generate_presigned_url(
+                'upload_part',
+                Params=params,
+                ExpiresIn=expiration
+            )
+            
+            if self.debug and i == 0:  # Only print the first URL to avoid flooding the console
+                print(f"Sample presigned upload URL (part 1): {url}")
+            
+            # Store the URL along with part information
+            result.append({
+                'url': url,
+                'part_number': part_number,
+                'start_byte': start,
+                'end_byte': end,
+                'size': end - start + 1
+            })
+        
+        return {
+            'upload_id': upload_id,
+            'parts': result
+        }
+    
+    def complete_multipart_upload(self, bucket: str, key: str, upload_id: str,
+                                 parts: List[Dict]) -> Dict:
+        """
+        Complete a multipart upload.
+        
+        Args:
+            bucket: S3 bucket name
+            key: S3 object key
+            upload_id: Multipart upload ID
+            parts: List of completed parts with ETag information
+            
+        Returns:
+            Response from S3 complete_multipart_upload API
+        """
+        # Format the parts information as required by S3 API
+        multipart_parts = [
+            {
+                'PartNumber': part['part_number'],
+                'ETag': part['etag']
+            }
+            for part in parts
+        ]
+        
+        # Complete the multipart upload
+        response = self.s3_client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={
+                'Parts': multipart_parts
+            }
+        )
+        
+        if self.debug:
+            print(f"Completed multipart upload: {response}")
+            
+        return response
 
 
 class SpeedMonitor:
-    """Track and display download speeds and part completion."""
+    """Track and display transfer speeds and part completion."""
     
     def __init__(self, update_interval: float = 0.5, total_parts: int = 0, speed_window_size: int = 5):
         """
@@ -372,8 +545,8 @@ class SpeedMonitor:
             await self.display_progress()
     
     async def display_progress(self):
-        """Display current progress, speed, completed parts, and total data downloaded."""
-        progress_str = f"Current download speed: {format_speed(self.current_speed)} | Downloaded: {format_size(self.total_bytes)}"
+        """Display current progress, speed, completed parts, and total data transferred."""
+        progress_str = f"Current speed: {format_speed(self.current_speed)} | Transferred: {format_size(self.total_bytes)}"
         if self.total_parts > 0:
             progress_str += f" | Parts: {self.completed_parts}/{self.total_parts}"
         
@@ -398,14 +571,16 @@ class SpeedMonitor:
             return 0
         return sum(self.speeds) / len(self.speeds)
     
-    def display_final_stats(self, results: List[Dict]):
+    def display_final_stats(self, results: List[Dict], mode: str = MODE_DOWNLOAD):
         """
-        Display final download statistics.
+        Display final transfer statistics.
         
         Args:
-            results: List of download result dictionaries
+            results: List of transfer result dictionaries
+            mode: Operation mode (download or upload)
         """
-        total_bytes = sum(r.get("bytes_downloaded", 0) for r in results)
+        bytes_key = "bytes_downloaded" if mode == MODE_DOWNLOAD else "bytes_uploaded"
+        total_bytes = sum(r.get(bytes_key, 0) for r in results)
         total_time = time.time() - self.start_time
         
         if total_time > 0:
@@ -413,15 +588,16 @@ class SpeedMonitor:
         else:
             average_speed = 0
         
-        print("\n\nDownload Benchmark Results:")
-        print(f"Total data downloaded: {format_size(total_bytes)}")
+        operation = "Download" if mode == MODE_DOWNLOAD else "Upload"
+        print(f"\n\n{operation} Benchmark Results:")
+        print(f"Total data transferred: {format_size(total_bytes)}")
         print(f"Total time: {total_time:.2f} seconds")
-        print(f"Average download speed: {format_speed(average_speed)}")
+        print(f"Average {operation.lower()} speed: {format_speed(average_speed)}")
         
         # Check for errors
         errors = [r for r in results if "error" in r]
         if errors:
-            print(f"\nWarning: {len(errors)} part(s) had errors during download.")
+            print(f"\nWarning: {len(errors)} part(s) had errors during {operation.lower()}.")
 
 
 class AsyncDownloader:
@@ -571,6 +747,129 @@ class AsyncDownloader:
         print(f"MD5 Checksum: {md5.hexdigest()}")
 
 
+class AsyncUploader:
+    """Handle parallel uploads using asyncio and httpx."""
+    
+    def __init__(self, speed_monitor):
+        """
+        Initialize with a speed monitor.
+        
+        Args:
+            speed_monitor: SpeedMonitor instance
+        """
+        self.speed_monitor = speed_monitor
+        self.content_generator = RandomContentGenerator()
+        
+    async def upload_part(self, client: httpx.AsyncClient, part_info: Dict,
+                         semaphore: asyncio.Semaphore, debug: bool = False) -> Dict:
+        """
+        Upload a single part with semaphore for concurrency control.
+        
+        Args:
+            client: httpx.AsyncClient instance
+            part_info: Dictionary with part information
+            semaphore: Asyncio semaphore for concurrency control
+            debug: Whether to enable debug output
+            
+        Returns:
+            Dict with upload metrics
+        """
+        url = part_info['url']
+        part_number = part_info['part_number']
+        start_byte = part_info['start_byte']
+        end_byte = part_info['end_byte']
+        
+        async with semaphore:
+            start_time = time.time()
+            
+            try:
+                if debug and part_number == 1:  # First part
+                    print(f"\nAttempting to upload part {part_number} with URL: {url}")
+                    print(f"Byte range: {start_byte}-{end_byte}")
+                
+                # Generate content for this part
+                content = self.content_generator.generate_content(start_byte, end_byte)
+                content_size = len(content)
+                
+                if debug and part_number == 1:
+                    print(f"Generated {format_size(content_size)} of content")
+                
+                # Upload the part
+                headers = {
+                    'Content-Length': str(content_size)
+                }
+                
+                async with client.stream("PUT", url, headers=headers, content=content) as response:
+                    if debug and part_number == 1:
+                        print(f"Response status: {response.status_code}")
+                        print(f"Response headers: {response.headers}")
+                    
+                    response.raise_for_status()
+                    etag = response.headers.get('ETag', '').strip('"')
+                    
+                    if not etag:
+                        raise ValueError(f"No ETag received for part {part_number}")
+                    
+                    # Update the speed monitor with the uploaded bytes
+                    await self.speed_monitor.update(content_size)
+                    
+            except (httpx.HTTPError, ValueError) as e:
+                error_msg = f"\nError uploading part {part_number}: {e}"
+                if isinstance(e, httpx.HTTPError) and hasattr(e, 'response') and e.response is not None:
+                    error_msg += f"\nStatus code: {e.response.status_code}"
+                    error_msg += f"\nResponse body: {e.response.text}"
+                
+                print(error_msg)
+                return {
+                    "part_number": part_number,
+                    "bytes_uploaded": 0,
+                    "time_taken": time.time() - start_time,
+                    "error": str(e)
+                }
+            
+            end_time = time.time()
+            # Notify the speed monitor that a part has been completed
+            await self.speed_monitor.part_completed()
+            
+            return {
+                "part_number": part_number,
+                "bytes_uploaded": content_size,
+                "time_taken": end_time - start_time,
+                "etag": etag
+            }
+    
+    async def upload_all(self, upload_info: Dict, max_concurrent: int, debug: bool = False) -> Tuple[List[Dict], str]:
+        """
+        Upload all parts in parallel with concurrency control.
+        
+        Args:
+            upload_info: Dictionary with upload_id and parts information
+            max_concurrent: Maximum number of concurrent uploads
+            debug: Whether to enable debug output
+            
+        Returns:
+            Tuple of (list of upload results, upload_id)
+        """
+        semaphore = asyncio.Semaphore(max_concurrent)
+        upload_id = upload_info['upload_id']
+        parts = upload_info['parts']
+        
+        # Configure httpx client with appropriate settings
+        client_kwargs = {
+            'timeout': httpx.Timeout(None),
+            'follow_redirects': True
+        }
+        
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            tasks = []
+            for part_info in parts:
+                tasks.append(self.upload_part(client, part_info, semaphore, debug))
+            
+            results = await asyncio.gather(*tasks)
+            
+            return results, upload_id
+
+
 def format_size(size: int) -> str:
     """
     Format size in bytes to human-readable format.
@@ -611,9 +910,9 @@ def format_speed(speed: float) -> str:
     return f"{speed:.2f} {units[unit_index]}"
 
 
-async def run_benchmark(session, bucket_name, object_key, part_size_bytes, parallel_parts, args):
+async def run_download_benchmark(session, bucket_name, object_key, part_size_bytes, parallel_parts, args):
     """
-    Run a single benchmark with specific parameters.
+    Run a single download benchmark with specific parameters.
     
     Args:
         session: boto3 session
@@ -659,8 +958,93 @@ async def run_benchmark(session, bucket_name, object_key, part_size_bytes, paral
     results = await downloader.download_all(url_infos, parallel_parts, args.debug)
     total_time = time.time() - start_time
     
+    # Display final stats
+    speed_monitor.display_final_stats(results, MODE_DOWNLOAD)
+    
     # Calculate total bytes and average speed
     total_bytes = sum(r.get("bytes_downloaded", 0) for r in results)
+    if total_time > 0:
+        average_speed = total_bytes / total_time
+    else:
+        average_speed = 0
+        
+    # Return benchmark results
+    return {
+        "part_size": format_size(part_size_bytes),
+        "part_size_bytes": part_size_bytes,
+        "parallel_parts": parallel_parts,
+        "total_parts": len(parts),
+        "total_bytes": total_bytes,
+        "total_time": total_time,
+        "average_speed": average_speed,
+        "average_speed_formatted": format_speed(average_speed)
+    }
+
+
+async def run_upload_benchmark(session, bucket_name, object_key, file_size_bytes, part_size_bytes, parallel_parts, args):
+    """
+    Run a single upload benchmark with specific parameters.
+    
+    Args:
+        session: boto3 session
+        bucket_name: S3 bucket name
+        object_key: S3 object key
+        file_size_bytes: Size of the file to upload in bytes
+        part_size_bytes: Size of each part in bytes
+        parallel_parts: Number of parts to upload in parallel
+        args: Command line arguments
+        
+    Returns:
+        Dict with benchmark results
+    """
+    # Initialize URL generator
+    url_generator = PresignedUrlGenerator(
+        session,
+        args.hostname,
+        args.protocol,
+        args.region,
+        args.use_path_style,
+        args.debug
+    )
+    
+    # Calculate part ranges
+    parts = calculate_parts(file_size_bytes, part_size_bytes)
+    print(f"\nBenchmarking with part size {format_size(part_size_bytes)} and {parallel_parts} parallel parts...")
+    print(f"Uploading in {len(parts)} parts")
+    
+    # Generate pre-signed URLs for upload
+    upload_info = url_generator.generate_upload_urls(bucket_name, object_key, parts)
+    
+    # Initialize speed monitor with total parts count
+    speed_monitor = SpeedMonitor(total_parts=len(parts))
+    speed_monitor.start()
+    
+    # Initialize uploader
+    uploader = AsyncUploader(speed_monitor)
+    
+    # Start uploads
+    start_time = time.time()
+    results, upload_id = await uploader.upload_all(upload_info, parallel_parts, args.debug)
+    
+    # Complete the multipart upload if there were no errors
+    if not any("error" in r for r in results):
+        try:
+            url_generator.complete_multipart_upload(
+                bucket_name,
+                object_key,
+                upload_id,
+                [r for r in results if "etag" in r]
+            )
+        except Exception as e:
+            print(f"\nError completing multipart upload: {e}")
+    
+    total_time = time.time() - start_time
+    
+    # Display final stats
+    speed_monitor.display_final_stats(results, MODE_UPLOAD)
+    
+    # Calculate total bytes and average speed
+    total_bytes = sum(r.get("bytes_uploaded", 0) for r in results)
     if total_time > 0:
         average_speed = total_bytes / total_time
     else:
@@ -710,49 +1094,79 @@ async def cli():
     credentials = CredentialManager(args.session_token).collect_credentials()
     session = credentials.get_session()
     
-    # Parse S3 URI
     try:
-        bucket_name, object_key = parse_s3_uri(args.s3_uri)
-    except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-    
-    try:
-        # Get object size (only need to do this once)
-        print(f"Getting object metadata for {args.s3_uri}...")
-        
-        # Initialize URL generator just to get object size
-        url_generator = PresignedUrlGenerator(
-            session,
-            args.hostname,
-            args.protocol,
-            args.region,
-            args.use_path_style,
-            args.debug
-        )
-        
-        object_size = url_generator.get_object_size(bucket_name, object_key)
-        print(f"Object size: {format_size(object_size)}")
-        
-        # Run benchmarks for all parameter combinations
-        benchmark_results = []
-        
-        print("\nRunning benchmarks for all parameter combinations...")
-        for part_size_bytes in args.part_sizes_bytes:
-            for parallel_parts in args.parallel_parts:
-                result = await run_benchmark(
-                    session,
-                    bucket_name,
-                    object_key,
-                    part_size_bytes,
-                    parallel_parts,
-                    args
-                )
-                benchmark_results.append(result)
-        
-        # Print results as TSV table
-        print_tsv_results(benchmark_results)
-        
+        # Handle download mode
+        if args.mode == MODE_DOWNLOAD:
+            # Parse S3 URI
+            try:
+                bucket_name, object_key = parse_s3_uri(args.s3_uri)
+            except ValueError as e:
+                print(f"Error: {e}")
+                sys.exit(1)
+                
+            # Get object size
+            print(f"Getting object metadata for {args.s3_uri}...")
+            
+            # Initialize URL generator just to get object size
+            url_generator = PresignedUrlGenerator(
+                session,
+                args.hostname,
+                args.protocol,
+                args.region,
+                args.use_path_style,
+                args.debug
+            )
+            
+            object_size = url_generator.get_object_size(bucket_name, object_key)
+            print(f"Object size: {format_size(object_size)}")
+            
+            # Run benchmarks for all parameter combinations
+            benchmark_results = []
+            
+            print("\nRunning download benchmarks for all parameter combinations...")
+            for part_size_bytes in args.part_sizes_bytes:
+                for parallel_parts in args.parallel_parts:
+                    result = await run_download_benchmark(
+                        session,
+                        bucket_name,
+                        object_key,
+                        part_size_bytes,
+                        parallel_parts,
+                        args
+                    )
+                    benchmark_results.append(result)
+            
+            # Print results as TSV table
+            print_tsv_results(benchmark_results)
+            
+        # Handle upload mode
+        elif args.mode == MODE_UPLOAD:
+            bucket_name = args.bucket
+            object_key = args.key
+            file_size_bytes = args.file_size_bytes
+            
+            print(f"Preparing to upload {format_size(file_size_bytes)} to s3://{bucket_name}/{object_key}")
+            
+            # Run benchmarks for all parameter combinations
+            benchmark_results = []
+            
+            print("\nRunning upload benchmarks for all parameter combinations...")
+            for part_size_bytes in args.part_sizes_bytes:
+                for parallel_parts in args.parallel_parts:
+                    result = await run_upload_benchmark(
+                        session,
+                        bucket_name,
+                        object_key,
+                        file_size_bytes,
+                        part_size_bytes,
+                        parallel_parts,
+                        args
+                    )
+                    benchmark_results.append(result)
+            
+            # Print results as TSV table
+            print_tsv_results(benchmark_results)
+            
     except Exception as e:
         print(f"\nError: {e}")
         sys.exit(1)
