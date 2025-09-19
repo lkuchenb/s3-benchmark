@@ -28,7 +28,7 @@ dependencies = [
 text = "Apache 2.0"
 
 [project.scripts]
-s3-benchmark = "s3_benchmark.main:main"
+s3-benchmark = "s3_benchmark.__init__:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

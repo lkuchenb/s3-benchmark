@@ -10,6 +10,13 @@ class UploadPartInfo(NamedTuple):
 
 class PartUploadResult(NamedTuple):
     part_number: int
-    bytes_uploaded: int
+    bytes_transferred: int
     time_taken: float
     etag: str
+
+
+class SummaryStats(NamedTuple):
+    total_bytes: int
+    total_time: float
+    average_speed: float
+    average_speed_formatted: str

@@ -6,7 +6,7 @@ from s3_benchmark.main import (
     run_upload_benchmark,
 )
 from s3_benchmark.parsing import parse_arguments, parse_s3_uri
-from s3_benchmark.utils import CredentialManager, PresignedUrlGenerator, format_size
+from s3_benchmark.utils import CredentialManager, format_size
 
 
 async def cli():
@@ -15,8 +15,8 @@ async def cli():
     args = parse_arguments()
 
     # Collect AWS credentials
-    credentials = CredentialManager(args.session_token).collect_credentials()
-    session = credentials.get_session()
+    credentials = CredentialManager().collect_credentials()
+    session = credentials.get_boto_session()
 
     try:
         if args.mode == MODE_DOWNLOAD:
@@ -36,17 +36,6 @@ async def download(args, session):
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
-
-    # Get object size
-    print(f"Getting object metadata for {args.s3_uri}...")
-
-    # Initialize URL generator just to get object size
-    url_generator = PresignedUrlGenerator(
-        session, args.hostname, args.protocol, args.region, args.use_path_style
-    )
-
-    object_size = url_generator.get_object_size(bucket_name, object_key)
-    print(f"Object size: {format_size(object_size)}")
 
     # Run benchmarks for all parameter combinations
     benchmark_results = []

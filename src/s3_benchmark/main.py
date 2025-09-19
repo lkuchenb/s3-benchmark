@@ -6,8 +6,6 @@ A tool to benchmark S3 operations using pre-signed URLs and multi-part transfers
 with asyncio for parallel processing. Supports both download and upload modes.
 """
 
-import time
-
 from s3_benchmark.constants import MODE_DOWNLOAD, MODE_UPLOAD
 from s3_benchmark.download import AsyncDownloader
 from s3_benchmark.upload import AsyncUploader
@@ -16,7 +14,6 @@ from s3_benchmark.utils import (
     SpeedMonitor,
     calculate_parts,
     format_size,
-    format_speed,
     get_s3_client,
 )
 
@@ -45,12 +42,6 @@ async def run_upload_benchmark(
     Returns:
         Dict with benchmark results
     """
-
-    s3_client = get_s3_client(
-        boto_session, args.hostname, args.protocol, args.region, args.use_path_style
-    )
-    url_generator = PresignedUrlGenerator(s3_client)
-
     # Calculate part ranges
     parts = calculate_parts(file_size_bytes, part_size_bytes)
     print(
@@ -58,8 +49,10 @@ async def run_upload_benchmark(
     )
     print(f"Uploading in {len(parts)} parts")
 
-    # Generate pre-signed URLs for upload
-    upload_info = url_generator.generate_upload_urls(bucket_name, object_key, parts)
+    s3_client = get_s3_client(
+        boto_session, args.hostname, args.protocol, args.region, args.use_path_style
+    )
+    url_generator = PresignedUrlGenerator(s3_client)
 
     # Initialize speed monitor with total parts count
     speed_monitor = SpeedMonitor(total_parts=len(parts))
@@ -67,35 +60,35 @@ async def run_upload_benchmark(
 
     # Initialize uploader
     uploader = AsyncUploader(
-        max_concurrent=args.parallel_uploads,
+        max_concurrent=parallel_parts,
         speed_monitor=speed_monitor,
         s3_client=s3_client,
     )
 
+    upload_id = await uploader.create_multipart_upload(bucket_name, object_key)
+    print(f"Initiated multipart upload with Upload ID: {upload_id}")
+
+    # Generate pre-signed URLs for upload
+    upload_info = url_generator.generate_upload_urls(
+        bucket=bucket_name, key=object_key, parts=parts, upload_id=upload_id
+    )
+    print(f"Generated {len(upload_info)} pre-signed URLs for upload")
+
     # Start uploads
-    start_time = time.time()
-    results, upload_id = await uploader.upload_all(upload_info)
+    results = await uploader.upload_all(upload_info)
+    print(f"Completed uploading {len(results)} parts")
 
-    # Complete the multipart upload if there were no errors
-    if not any("error" in r for r in results):
-        try:
-            await uploader.complete_multipart_upload(
-                bucket_name, object_key, upload_id, [r for r in results if "etag" in r]
-            )
-        except Exception as e:
-            print(f"\nError completing multipart upload: {e}")
-
-    total_time = time.time() - start_time
+    # Complete the multipart upload
+    try:
+        await uploader.complete_multipart_upload(
+            bucket_name, object_key, upload_id, results
+        )
+    except Exception as e:
+        print(f"\nError completing multipart upload: {e}")
 
     # Display final stats
-    speed_monitor.display_final_stats(results, MODE_UPLOAD)
-
-    # Calculate total bytes and average speed
-    total_bytes = sum(r.get("bytes_uploaded", 0) for r in results)
-    if total_time > 0:
-        average_speed = total_bytes / total_time
-    else:
-        average_speed = 0
+    summary_stats = speed_monitor.enrich_results(results, MODE_UPLOAD)
+    speed_monitor.display_final_stats(summary_stats, MODE_UPLOAD)
 
     # Return benchmark results
     return {
@@ -103,10 +96,10 @@ async def run_upload_benchmark(
         "part_size_bytes": part_size_bytes,
         "parallel_parts": parallel_parts,
         "total_parts": len(parts),
-        "total_bytes": total_bytes,
-        "total_time": total_time,
-        "average_speed": average_speed,
-        "average_speed_formatted": format_speed(average_speed),
+        "total_bytes": summary_stats.total_bytes,
+        "total_time": summary_stats.total_time,
+        "average_speed": summary_stats.average_speed,
+        "average_speed_formatted": summary_stats.average_speed_formatted,
     }
 
 
@@ -134,6 +127,7 @@ async def run_download_benchmark(
 
     # Get object size
     object_size = url_generator.get_object_size(bucket_name, object_key)
+    print(f"Object size: {format_size(object_size)}")
 
     # Calculate part ranges
     parts = calculate_parts(object_size, part_size_bytes)
@@ -155,16 +149,11 @@ async def run_download_benchmark(
     )
 
     # Start downloads
-    start_time = time.time()
     results = await downloader.download_all(url_infos)
-    total_time = time.time() - start_time
 
     # Display final stats
-    speed_monitor.display_final_stats(results, MODE_DOWNLOAD)
-
-    # Calculate total bytes and average speed
-    total_bytes = sum(r.get("bytes_downloaded", 0) for r in results)
-    average_speed = max(0, total_bytes / total_time)
+    summary_stats = speed_monitor.enrich_results(results, MODE_DOWNLOAD)
+    speed_monitor.display_final_stats(summary_stats, MODE_DOWNLOAD)
 
     # Return benchmark results
     return {
@@ -172,10 +161,10 @@ async def run_download_benchmark(
         "part_size_bytes": part_size_bytes,
         "parallel_parts": parallel_parts,
         "total_parts": len(parts),
-        "total_bytes": total_bytes,
-        "total_time": total_time,
-        "average_speed": average_speed,
-        "average_speed_formatted": format_speed(average_speed),
+        "total_bytes": summary_stats.total_bytes,
+        "total_time": summary_stats.total_time,
+        "average_speed": summary_stats.average_speed,
+        "average_speed_formatted": summary_stats.average_speed_formatted,
     }
 
 

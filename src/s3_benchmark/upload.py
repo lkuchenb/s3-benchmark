@@ -42,6 +42,7 @@ class AsyncUploader:
         Returns:
             Upload ID
         """
+        await self.client.__aenter__()
         response = self.s3_client.create_multipart_upload(Bucket=bucket, Key=key)
         return response["UploadId"]
 
@@ -64,11 +65,12 @@ class AsyncUploader:
         end_byte = part_info.end_byte
 
         async with self.semaphore:
+            print(f"\rUploading part {part_number}...", end="")
             start_time = time.time()
 
             try:
                 # Generate content for this part
-                content = generate_content(start_byte, end_byte)
+                content = generate_content(end_byte - start_byte + 1)
                 content_size = len(content)
 
                 # Upload the part
@@ -110,12 +112,14 @@ class AsyncUploader:
 
             return PartUploadResult(
                 part_number=part_number,
-                bytes_uploaded=content_size,
+                bytes_transferred=content_size,
                 time_taken=end_time - start_time,
                 etag=etag,
             )
 
-    async def upload_all(self, upload_info: dict) -> tuple[list[PartUploadResult], str]:
+    async def upload_all(
+        self, upload_info: list[UploadPartInfo]
+    ) -> list[PartUploadResult]:
         """
         Upload all parts in parallel with concurrency control.
 
@@ -127,19 +131,18 @@ class AsyncUploader:
         Returns:
             Tuple of (list of upload results, upload_id)
         """
-        await self.client.__aenter__()
 
-        parts = upload_info["parts"]
         tasks = []
-        for part_info in parts:
+        print("")
+        for part_info in upload_info:
             tasks.append(self.upload_part(part_info))
-
+        print("")
         results = await asyncio.gather(*tasks)
 
         return results
 
     async def complete_multipart_upload(
-        self, bucket: str, key: str, upload_id: str, parts: list[dict]
+        self, bucket: str, key: str, upload_id: str, parts: list[PartUploadResult]
     ) -> dict:
         """
         Complete a multipart upload.
@@ -155,7 +158,7 @@ class AsyncUploader:
         """
         # Format the parts information as required by S3 API
         multipart_parts = [
-            {"PartNumber": part["part_number"], "ETag": part["etag"]} for part in parts
+            {"PartNumber": part.part_number, "ETag": part.etag} for part in parts
         ]
 
         # Complete the multipart upload

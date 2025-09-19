@@ -18,7 +18,7 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "repeats", type=int, help="Number of times to repeat the benchmark"
+        "--repeats", type=int, default=1, help="Number of times to repeat the benchmark"
     )
 
     # Download mode arguments
@@ -78,18 +78,6 @@ def parse_arguments():
         "--use-path-style",
         action="store_true",
         help="Use path-style addressing instead of virtual-hosted style",
-    )
-
-    parser.add_argument("--debug", action="store_true", help="Enable debug output")
-
-    parser.add_argument(
-        "--verify",
-        action="store_true",
-        help="Store file contents in memory and report MD5 checksum",
-    )
-
-    parser.add_argument(
-        "--session-token", type=str, help="AWS session token for authentication"
     )
 
     args = parser.parse_args()

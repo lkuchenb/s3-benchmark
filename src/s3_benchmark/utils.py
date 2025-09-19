@@ -1,4 +1,5 @@
 import asyncio
+from functools import lru_cache
 import random
 import re
 import time
@@ -6,6 +7,7 @@ from collections.abc import Generator
 import boto3
 from botocore.config import Config
 from s3_benchmark.constants import DEFAULT_SEED, MODE_DOWNLOAD
+from s3_benchmark.structs import PartUploadResult, SummaryStats, UploadPartInfo
 
 
 class CredentialManager:
@@ -28,7 +30,7 @@ class CredentialManager:
 
         return self
 
-    def get_session(self):
+    def get_boto_session(self):
         """
         Create and return a boto3 session with the collected credentials.
 
@@ -45,11 +47,10 @@ class CredentialManager:
 
 def get_s3_client(
     boto_session,
-    hostname=None,
+    hostname,
     protocol="https",
     region="us-east-1",
     use_path_style=False,
-    debug=False,
 ) -> boto3.client:
     """
     Create and return a boto3 S3 client with optional custom configuration.
@@ -65,36 +66,24 @@ def get_s3_client(
     Returns:
         boto3 S3 client
     """
+    # Use custom endpoint
+    endpoint_url = f"{protocol}://{hostname}"
+    print(f"Using custom endpoint: {endpoint_url}")
+    print(f"Region: {region}")
+    print(f"Path-style addressing: {use_path_style}")
 
-    if hostname:
-        # Use custom endpoint
-        endpoint_url = f"{protocol}://{hostname}"
-        print(f"Using custom endpoint: {endpoint_url}")
-        print(f"Region: {region}")
-        print(f"Path-style addressing: {use_path_style}")
-
-        s3_client = boto_session.client(
-            "s3",
-            endpoint_url=endpoint_url,
-            region_name=region,
-            config=Config(
-                s3={"addressing_style": "path" if use_path_style else "auto"}
-            ),
-        )
-    else:
-        print(f"Using AWS S3 with region: {region}")
-        s3_client = boto_session.client("s3", region_name=region)
-
-    endpoint_url = None
-    if hostname:
-        endpoint_url = f"{protocol}://{hostname}"
-        if debug:
-            print(f"Using custom endpoint URL: {endpoint_url}")
+    s3_client = boto_session.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        region_name=region,
+        config=Config(s3={"addressing_style": "path" if use_path_style else "auto"}),
+    )
 
     return s3_client
 
 
-def generate_content(start_byte: int, end_byte: int, seed: int = DEFAULT_SEED) -> bytes:
+@lru_cache
+def generate_content(size, seed: int = DEFAULT_SEED) -> bytes:
     """
     Generate deterministic pseudo-random content for a specific byte range.
 
@@ -105,12 +94,9 @@ def generate_content(start_byte: int, end_byte: int, seed: int = DEFAULT_SEED) -
     Returns:
         Bytes object containing the generated content
     """
-    # Calculate the size of the content to generate
-    size = end_byte - start_byte + 1
-
     # Create a random generator with a seed based on the start position
     # This ensures deterministic content for each part
-    rng = random.Random(seed + start_byte)
+    rng = random.Random(seed)
 
     # Generate the content as bytes
     # Using a bytearray for efficiency when generating large content
@@ -212,16 +198,16 @@ class SpeedMonitor:
         # Print with carriage return
         print(f"\r{progress_str}", end="")
 
-    def display_final_stats(self, results: list[dict], mode: str = MODE_DOWNLOAD):
+    def enrich_results(
+        self, results: list[PartUploadResult], mode: str = MODE_DOWNLOAD
+    ) -> SummaryStats:
         """
-        Display final transfer statistics.
+        Enrich results with total bytes and average speed.
 
         Args:
             results: List of transfer result dictionaries
-            mode: Operation mode (download or upload)
         """
-        bytes_key = "bytes_downloaded" if mode == MODE_DOWNLOAD else "bytes_uploaded"
-        total_bytes = sum(r.get(bytes_key, 0) for r in results)
+        total_bytes = sum(r.bytes_transferred for r in results)
         total_time = time.time() - self.start_time
 
         if total_time > 0:
@@ -229,18 +215,27 @@ class SpeedMonitor:
         else:
             average_speed = 0
 
+        return SummaryStats(
+            total_bytes=total_bytes,
+            total_time=total_time,
+            average_speed=average_speed,
+            average_speed_formatted=format_speed(average_speed),
+        )
+
+    def display_final_stats(self, results: SummaryStats, mode: str = MODE_DOWNLOAD):
+        """
+        Display final transfer statistics.
+
+        Args:
+            results: List of transfer result dictionaries
+            mode: Operation mode (download or upload)
+        """
+
         operation = "Download" if mode == MODE_DOWNLOAD else "Upload"
         print(f"\n\n{operation} Benchmark Results:")
-        print(f"Total data transferred: {format_size(total_bytes)}")
-        print(f"Total time: {total_time:.2f} seconds")
-        print(f"Average {operation.lower()} speed: {format_speed(average_speed)}")
-
-        # Check for errors
-        errors = [r for r in results if "error" in r]
-        if errors:
-            print(
-                f"\nWarning: {len(errors)} part(s) had errors during {operation.lower()}."
-            )
+        print(f"Total data transferred: {format_size(results.total_bytes)}")
+        print(f"Total time: {results.total_time:.2f} seconds")
+        print(f"Average {operation.lower()} speed: {results.average_speed_formatted}")
 
 
 class PresignedUrlGenerator:
@@ -251,12 +246,7 @@ class PresignedUrlGenerator:
         Initialize with a boto3 session.
 
         Args:
-            session: boto3.Session object
-            hostname: Optional custom S3 server hostname
-            protocol: Protocol to use (http or https)
-            region: AWS region or custom region for S3-compatible server
-            use_path_style: Whether to use path-style addressing
-            debug: Whether to enable debug output
+            s3_client: boto3.client object
         """
         self.s3_client = s3_client
 
@@ -312,7 +302,7 @@ class PresignedUrlGenerator:
         *,
         bucket: str,
         key: str,
-        num_parts: int,
+        parts: int,
         upload_id: str,
         expires_in: int = 3600,
     ) -> Generator[dict, None, None]:
@@ -328,7 +318,9 @@ class PresignedUrlGenerator:
         Returns:
             Dictionary with upload_id and parts information
         """
-        for i in range(num_parts):
+
+        upload_info = []
+        for i, (start, end) in enumerate(parts):
             part_number = i + 1  # S3 part numbers are 1-based
 
             # Generate presigned URL for this part
@@ -344,10 +336,14 @@ class PresignedUrlGenerator:
             )
 
             # Store the URL along with part information
-            yield {
-                "url": url,
-                "part_number": part_number,
-            }
+            upload_info.append(
+                UploadPartInfo(
+                    url=url, part_number=part_number, start_byte=start, end_byte=end
+                )
+            )
+
+        # Return the complete upload information
+        return upload_info
 
 
 def calculate_parts(object_size: int, part_size: int) -> list[tuple[int, int]]:
