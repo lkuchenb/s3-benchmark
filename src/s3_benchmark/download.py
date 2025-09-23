@@ -2,6 +2,7 @@ import asyncio
 import time
 import httpx
 
+from s3_benchmark.structs import DownloadPartInfo, PartDownloadResult
 from s3_benchmark.utils import SpeedMonitor
 
 
@@ -26,8 +27,8 @@ class AsyncDownloader:
         self.stream_transfer = stream_transfer
 
     async def download_part(
-        self, client: httpx.AsyncClient, url_info: tuple[str, str], part_number: int
-    ) -> dict:
+        self, client: httpx.AsyncClient, url_info: DownloadPartInfo, part_number: int
+    ) -> PartDownloadResult:
         """
         Download a single part with semaphore for concurrency control.
 
@@ -39,7 +40,7 @@ class AsyncDownloader:
         Returns:
             Dict with download metrics
         """
-        url, range_header = url_info
+        url, range_header = url_info.url, url_info.range_header
 
         async with self.semaphore:
             start_time = time.time()
@@ -73,24 +74,24 @@ class AsyncDownloader:
                     error_msg += f"\nResponse body: {exc.response.text}"
 
                 print(error_msg)
-                return {
-                    "part_number": part_number,
-                    "bytes_downloaded": total_bytes,
-                    "time_taken": time.time() - start_time,
-                    "error": str(exc),
-                }
+                return PartDownloadResult(
+                    part_number=part_number,
+                    bytes_transferred=total_bytes,
+                    time_taken=time.time() - start_time,
+                    error=str(exc),
+                )
 
             end_time = time.time()
             # Notify the speed monitor that a part has been completed
             await self.speed_monitor.part_completed()
 
-            return {
-                "part_number": part_number,
-                "bytes_downloaded": total_bytes,
-                "time_taken": end_time - start_time,
-            }
+            return PartDownloadResult(
+                part_number=part_number,
+                bytes_transferred=total_bytes,
+                time_taken=end_time - start_time,
+            )
 
-    async def download_all(self, url_infos: list[tuple[str, str]]) -> list[dict]:
+    async def download_all(self, url_infos: list[DownloadPartInfo]) -> list[PartDownloadResult]:
         """
         Download all parts in parallel with concurrency control.
 

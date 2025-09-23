@@ -1,13 +1,12 @@
 import asyncio
 from functools import lru_cache
-import random
 import re
 import time
 from collections.abc import Generator
 import boto3
 from botocore.config import Config
-from s3_benchmark.constants import DEFAULT_SEED, MODE_DOWNLOAD
-from s3_benchmark.structs import PartUploadResult, SummaryStats, UploadPartInfo
+from s3_benchmark.constants import MODE_DOWNLOAD
+from s3_benchmark.structs import DownloadPartInfo, PartUploadResult, SummaryStats, UploadPartInfo
 
 
 class CredentialManager:
@@ -83,7 +82,7 @@ def get_s3_client(
 
 
 @lru_cache
-def generate_content(size, seed: int = DEFAULT_SEED) -> bytes:
+def generate_content(size) -> bytes:
     """
     Generate deterministic pseudo-random content for a specific byte range.
 
@@ -94,17 +93,7 @@ def generate_content(size, seed: int = DEFAULT_SEED) -> bytes:
     Returns:
         Bytes object containing the generated content
     """
-    # Create a random generator with a seed based on the start position
-    # This ensures deterministic content for each part
-    rng = random.Random(seed)
-
-    # Generate the content as bytes
-    # Using a bytearray for efficiency when generating large content
-    content = bytearray(size)
-    for i in range(size):
-        content[i] = rng.randint(0, 255)
-
-    return bytes(content)
+    return b"1" * size
 
 
 class SpeedMonitor:
@@ -199,7 +188,7 @@ class SpeedMonitor:
         print(f"\r{progress_str}", end="")
 
     def enrich_results(
-        self, results: list[PartUploadResult], mode: str = MODE_DOWNLOAD
+        self, results: list[PartUploadResult]
     ) -> SummaryStats:
         """
         Enrich results with total bytes and average speed.
@@ -210,16 +199,17 @@ class SpeedMonitor:
         total_bytes = sum(r.bytes_transferred for r in results)
         total_time = time.time() - self.start_time
 
-        if total_time > 0:
-            average_speed = total_bytes / total_time
-        else:
-            average_speed = 0
+        part_speeds = [r.time_taken / r.bytes_transferred if r.bytes_transferred > 0 else 0 for r in results]
+
+        average_speed = sum(part_speeds) / len(part_speeds)
+        variance = sum(pow(speed - average_speed, 2) for speed in part_speeds) / len(part_speeds)
+        stddev = variance**0.5
 
         return SummaryStats(
             total_bytes=total_bytes,
             total_time=total_time,
             average_speed=average_speed,
-            average_speed_formatted=format_speed(average_speed),
+            std_deviation=stddev,
         )
 
     def display_final_stats(self, results: SummaryStats, mode: str = MODE_DOWNLOAD):
@@ -270,7 +260,7 @@ class PresignedUrlGenerator:
         key: str,
         parts: list[tuple[int, int]],
         expiration: int = 3600,
-    ) -> list[tuple[str, str]]:
+    ) -> list[DownloadPartInfo]:
         """
         Generate pre-signed URLs for downloading parts.
 
@@ -293,7 +283,7 @@ class PresignedUrlGenerator:
             )
 
             # Return both the URL and the range header
-            urls.append((url, range_header))
+            urls.append(DownloadPartInfo(url=url, range_header=range_header))
 
         return urls
 
@@ -379,7 +369,7 @@ def format_size(size: int) -> str:
     unit_index = 0
 
     while size >= 1024 and unit_index < len(units) - 1:
-        size //= 1024
+        size /= 1024
         unit_index += 1
 
     return f"{size:.2f} {units[unit_index]}"

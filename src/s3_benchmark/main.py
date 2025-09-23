@@ -8,12 +8,14 @@ with asyncio for parallel processing. Supports both download and upload modes.
 
 from s3_benchmark.constants import MODE_DOWNLOAD, MODE_UPLOAD
 from s3_benchmark.download import AsyncDownloader
+from s3_benchmark.structs import RunResult
 from s3_benchmark.upload import AsyncUploader
 from s3_benchmark.utils import (
     PresignedUrlGenerator,
     SpeedMonitor,
     calculate_parts,
     format_size,
+    format_speed,
     get_s3_client,
 )
 
@@ -26,7 +28,7 @@ async def run_upload_benchmark(
     part_size_bytes,
     parallel_parts,
     args,
-):
+) -> RunResult:
     """
     Run a single upload benchmark with specific parameters.
 
@@ -87,25 +89,25 @@ async def run_upload_benchmark(
         print(f"\nError completing multipart upload: {e}")
 
     # Display final stats
-    summary_stats = speed_monitor.enrich_results(results, MODE_UPLOAD)
+    summary_stats = speed_monitor.enrich_results(results)
     speed_monitor.display_final_stats(summary_stats, MODE_UPLOAD)
 
     # Return benchmark results
-    return {
-        "part_size": format_size(part_size_bytes),
-        "part_size_bytes": part_size_bytes,
-        "parallel_parts": parallel_parts,
-        "total_parts": len(parts),
-        "total_bytes": summary_stats.total_bytes,
-        "total_time": summary_stats.total_time,
-        "average_speed": summary_stats.average_speed,
-        "average_speed_formatted": summary_stats.average_speed_formatted,
-    }
+    return RunResult(
+        part_size=format_size(part_size_bytes),
+        part_size_bytes=part_size_bytes,
+        parallel_parts=parallel_parts,
+        total_parts=len(parts),
+        total_bytes=summary_stats.total_bytes,
+        total_time=summary_stats.total_time,
+        average_speed=format_speed(summary_stats.average_speed),
+        std_deviation=format_speed(summary_stats.std_deviation),
+    )
 
 
 async def run_download_benchmark(
     boto_session, bucket_name, object_key, part_size_bytes, parallel_parts, args
-):
+) -> RunResult:
     """
     Run a single download benchmark with specific parameters.
 
@@ -152,23 +154,23 @@ async def run_download_benchmark(
     results = await downloader.download_all(url_infos)
 
     # Display final stats
-    summary_stats = speed_monitor.enrich_results(results, MODE_DOWNLOAD)
+    summary_stats = speed_monitor.enrich_results(results)
     speed_monitor.display_final_stats(summary_stats, MODE_DOWNLOAD)
 
     # Return benchmark results
-    return {
-        "part_size": format_size(part_size_bytes),
-        "part_size_bytes": part_size_bytes,
-        "parallel_parts": parallel_parts,
-        "total_parts": len(parts),
-        "total_bytes": summary_stats.total_bytes,
-        "total_time": summary_stats.total_time,
-        "average_speed": summary_stats.average_speed,
-        "average_speed_formatted": summary_stats.average_speed_formatted,
-    }
+    return RunResult(
+        part_size=format_size(part_size_bytes),
+        part_size_bytes=part_size_bytes,
+        parallel_parts=parallel_parts,
+        total_parts=len(parts),
+        total_bytes=summary_stats.total_bytes,
+        total_time=summary_stats.total_time,
+        average_speed=format_speed(summary_stats.average_speed),
+        std_deviation=format_speed(summary_stats.std_deviation),
+    )
 
 
-def print_tsv_results(benchmark_results):
+def print_tsv_results(benchmark_results: list[RunResult]) -> None:
     """
     Print benchmark results as a TSV table.
 
@@ -178,15 +180,15 @@ def print_tsv_results(benchmark_results):
     # Sort results by part size and parallel parts
     sorted_results = sorted(
         benchmark_results,
-        key=lambda x: (x.get("part_size_bytes", 0), x.get("parallel_parts", 0)),
+        key=lambda x: (x.part_size_bytes, x.parallel_parts),
     )
 
     # Print TSV header
     print("\nBenchmark Results (TSV format):")
-    print("Part Size\tParallel Parts\tTotal Time (s)\tAverage Speed")
+    print("Part Size\tParallel Parts\tTotal Time (s)\tAverage Speed\tStd Deviation")
 
     # Print TSV rows
     for result in sorted_results:
         print(
-            f"{result['part_size']}\t{result['parallel_parts']}\t{result['total_time']:.2f}\t{result['average_speed_formatted']}"
+            f"{result.part_size}\t{result.parallel_parts}\t{result.total_time:.2f}\t{result.average_speed}\t{result.std_deviation}"
         )
