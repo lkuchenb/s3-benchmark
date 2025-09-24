@@ -43,10 +43,10 @@ async def download(args, session):
     print("\nRunning download benchmarks for all parameter combinations...")
     for part_size_bytes in args.part_sizes_bytes:
         for parallel_parts in args.parallel_parts:
-            for repeats in range(args.repeats):
+            for repeats in range(args.num_repeats):
                 print(
                     f"\nBenchmarking download: part size {format_size(part_size_bytes)}, "
-                    f"parallel parts {parallel_parts}, repeat {repeats + 1}/{args.repeats}"
+                    f"parallel parts {parallel_parts}, repeat {repeats + 1}/{args.num_repeats}"
                 )
                 result = await run_download_benchmark(
                     session,
@@ -59,7 +59,7 @@ async def download(args, session):
                 benchmark_results.append(result)
 
     # Print results as TSV table
-    print_tsv_results(benchmark_results)
+    print_tsv_results(benchmark_results, args.output)
 
 
 async def upload(args, session):
@@ -78,10 +78,10 @@ async def upload(args, session):
     print("\nRunning upload benchmarks for all parameter combinations...")
     for part_size_bytes in args.part_sizes_bytes:
         for parallel_parts in args.parallel_parts:
-            for repeats in range(args.repeats):
+            for repeats in range(args.num_repeats):
                 print(
                     f"\nBenchmarking upload: part size {format_size(part_size_bytes)}, "
-                    f"parallel parts {parallel_parts}, repeat {repeats + 1}/{args.repeats}"
+                    f"parallel parts {parallel_parts}, repeat {repeats + 1}/{args.num_repeats}"
                 )
                 result = await run_upload_benchmark(
                     session,
@@ -95,4 +95,4 @@ async def upload(args, session):
             benchmark_results.append(result)
 
     # Print results as TSV table
-    print_tsv_results(benchmark_results)
+    print_tsv_results(benchmark_results, args.output)

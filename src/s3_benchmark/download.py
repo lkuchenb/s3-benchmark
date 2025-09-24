@@ -91,7 +91,9 @@ class AsyncDownloader:
                 time_taken=end_time - start_time,
             )
 
-    async def download_all(self, url_infos: list[DownloadPartInfo]) -> list[PartDownloadResult]:
+    async def download_all(
+        self, url_infos: list[DownloadPartInfo]
+    ) -> list[PartDownloadResult]:
         """
         Download all parts in parallel with concurrency control.
 

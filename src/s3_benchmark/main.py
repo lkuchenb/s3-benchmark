@@ -6,6 +6,7 @@ A tool to benchmark S3 operations using pre-signed URLs and multi-part transfers
 with asyncio for parallel processing. Supports both download and upload modes.
 """
 
+import sys
 from s3_benchmark.constants import MODE_DOWNLOAD, MODE_UPLOAD
 from s3_benchmark.download import AsyncDownloader
 from s3_benchmark.structs import RunResult
@@ -47,7 +48,7 @@ async def run_upload_benchmark(
     # Calculate part ranges
     parts = calculate_parts(file_size_bytes, part_size_bytes)
     print(
-        f"\nBenchmarking with part size {format_size(part_size_bytes)} and {parallel_parts} parallel parts..."
+        f"\nBenchmarking with part size {format_size(part_size_bytes)} and {parallel_parts} parallel part(s)..."
     )
     print(f"Uploading in {len(parts)} parts")
 
@@ -65,6 +66,7 @@ async def run_upload_benchmark(
         max_concurrent=parallel_parts,
         speed_monitor=speed_monitor,
         s3_client=s3_client,
+        stream_transfer=args.stream_transfer,
     )
 
     upload_id = await uploader.create_multipart_upload(bucket_name, object_key)
@@ -78,7 +80,7 @@ async def run_upload_benchmark(
 
     # Start uploads
     results = await uploader.upload_all(upload_info)
-    print(f"Completed uploading {len(results)} parts")
+    print(f"\nCompleted uploading {len(results)} parts")
 
     # Complete the multipart upload
     try:
@@ -100,6 +102,7 @@ async def run_upload_benchmark(
         total_parts=len(parts),
         total_bytes=summary_stats.total_bytes,
         total_time=summary_stats.total_time,
+        average_part_speed=format_speed(summary_stats.average_part_speed),
         average_speed=format_speed(summary_stats.average_speed),
         std_deviation=format_speed(summary_stats.std_deviation),
     )
@@ -134,7 +137,7 @@ async def run_download_benchmark(
     # Calculate part ranges
     parts = calculate_parts(object_size, part_size_bytes)
     print(
-        f"\nBenchmarking with part size {format_size(part_size_bytes)} and {parallel_parts} parallel parts..."
+        f"\nBenchmarking with part size {format_size(part_size_bytes)} and {parallel_parts} parallel part(s)..."
     )
     print(f"Downloading in {len(parts)} parts")
 
@@ -147,7 +150,9 @@ async def run_download_benchmark(
 
     # Initialize downloader
     downloader = AsyncDownloader(
-        max_concurrent=parallel_parts, speed_monitor=speed_monitor
+        max_concurrent=parallel_parts,
+        speed_monitor=speed_monitor,
+        stream_transfer=args.stream_transfer,
     )
 
     # Start downloads
@@ -165,12 +170,13 @@ async def run_download_benchmark(
         total_parts=len(parts),
         total_bytes=summary_stats.total_bytes,
         total_time=summary_stats.total_time,
+        average_part_speed=format_speed(summary_stats.average_part_speed),
         average_speed=format_speed(summary_stats.average_speed),
         std_deviation=format_speed(summary_stats.std_deviation),
     )
 
 
-def print_tsv_results(benchmark_results: list[RunResult]) -> None:
+def print_tsv_results(benchmark_results: list[RunResult], output_file: str) -> None:
     """
     Print benchmark results as a TSV table.
 
@@ -183,12 +189,20 @@ def print_tsv_results(benchmark_results: list[RunResult]) -> None:
         key=lambda x: (x.part_size_bytes, x.parallel_parts),
     )
 
+    output = sys.stdout if not output_file else open(output_file, "w")
     # Print TSV header
-    print("\nBenchmark Results (TSV format):")
-    print("Part Size\tParallel Parts\tTotal Time (s)\tAverage Speed\tStd Deviation")
+    print("")
+    print(
+        "Part Size\tParallel Parts\tNumber of Parts\tTotal Time (s)\tAverage Speed\tAverage Part Speed\tStd Deviation",
+        file=output,
+    )
 
     # Print TSV rows
     for result in sorted_results:
         print(
-            f"{result.part_size}\t{result.parallel_parts}\t{result.total_time:.2f}\t{result.average_speed}\t{result.std_deviation}"
+            f"{result.part_size}\t{result.parallel_parts}\t{result.total_parts}\t{result.total_time:.2f}\t{result.average_speed}\t{result.average_part_speed}\t{result.std_deviation}",
+            file=output,
         )
+    if output != sys.stdout:
+        output.close()
+        print(f"\nBenchmark results saved to {output_file}")

@@ -6,7 +6,12 @@ from collections.abc import Generator
 import boto3
 from botocore.config import Config
 from s3_benchmark.constants import MODE_DOWNLOAD
-from s3_benchmark.structs import DownloadPartInfo, PartUploadResult, SummaryStats, UploadPartInfo
+from s3_benchmark.structs import (
+    DownloadPartInfo,
+    PartUploadResult,
+    SummaryStats,
+    UploadPartInfo,
+)
 
 
 class CredentialManager:
@@ -187,9 +192,7 @@ class SpeedMonitor:
         # Print with carriage return
         print(f"\r{progress_str}", end="")
 
-    def enrich_results(
-        self, results: list[PartUploadResult]
-    ) -> SummaryStats:
+    def enrich_results(self, results: list[PartUploadResult]) -> SummaryStats:
         """
         Enrich results with total bytes and average speed.
 
@@ -199,15 +202,22 @@ class SpeedMonitor:
         total_bytes = sum(r.bytes_transferred for r in results)
         total_time = time.time() - self.start_time
 
-        part_speeds = [r.time_taken / r.bytes_transferred if r.bytes_transferred > 0 else 0 for r in results]
+        average_speed = total_bytes / total_time if total_time > 0 else 0
 
-        average_speed = sum(part_speeds) / len(part_speeds)
-        variance = sum(pow(speed - average_speed, 2) for speed in part_speeds) / len(part_speeds)
+        part_speeds = [
+            r.bytes_transferred / r.time_taken if r.bytes_transferred > 0 else 0
+            for r in results
+        ]
+        average_part_speed = sum(part_speeds) / len(part_speeds)
+        variance = sum(
+            pow(speed - average_part_speed, 2) for speed in part_speeds
+        ) / len(part_speeds)
         stddev = variance**0.5
 
         return SummaryStats(
             total_bytes=total_bytes,
             total_time=total_time,
+            average_part_speed=average_part_speed,
             average_speed=average_speed,
             std_deviation=stddev,
         )
@@ -225,7 +235,12 @@ class SpeedMonitor:
         print(f"\n\n{operation} Benchmark Results:")
         print(f"Total data transferred: {format_size(results.total_bytes)}")
         print(f"Total time: {results.total_time:.2f} seconds")
-        print(f"Average {operation.lower()} speed: {results.average_speed_formatted}")
+        print(
+            f"Average {operation.lower()} speed: {format_speed(results.average_speed)}"
+        )
+        print(
+            f"Average part speed: {format_speed(results.average_part_speed)} +/- {format_speed(results.std_deviation)}"
+        )
 
 
 class PresignedUrlGenerator:

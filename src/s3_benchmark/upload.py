@@ -65,7 +65,6 @@ class AsyncUploader:
         end_byte = part_info.end_byte
 
         async with self.semaphore:
-            print(f"\rUploading part {part_number}...", end="")
             start_time = time.time()
 
             try:
@@ -133,10 +132,8 @@ class AsyncUploader:
         """
 
         tasks = []
-        print("")
         for part_info in upload_info:
             tasks.append(self.upload_part(part_info))
-        print("")
         results = await asyncio.gather(*tasks)
 
         return results

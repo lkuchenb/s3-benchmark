@@ -18,7 +18,17 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--repeats", type=int, default=1, help="Number of times to repeat the benchmark"
+        "--output",
+        type=str,
+        default="",
+        help="Output file to save benchmark results (TSV format)",
+    )
+
+    parser.add_argument(
+        "--num-repeats",
+        type=int,
+        default=1,
+        help="Number of times to repeat the benchmark",
     )
 
     # Download mode arguments
@@ -78,6 +88,12 @@ def parse_arguments():
         "--use-path-style",
         action="store_true",
         help="Use path-style addressing instead of virtual-hosted style",
+    )
+
+    parser.add_argument(
+        "--stream-transfer",
+        action="store_true",
+        help="Use streaming transfer mode (default: False)",
     )
 
     args = parser.parse_args()
