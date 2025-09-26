@@ -92,7 +92,7 @@ async def upload(args, session):
                     parallel_parts,
                     args,
                 )
-            benchmark_results.append(result)
+                benchmark_results.append(result)
 
     # Print results as TSV table
     print_tsv_results(benchmark_results, args.output)
